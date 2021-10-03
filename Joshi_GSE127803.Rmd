@@ -1,0 +1,134 @@
+---
+title: "Joshi_GSE127803"
+author: "Alsya Affandi"
+date: "12/18/2020"
+output: html_document
+---
+```{r packages}
+# install.packages(c("devtools","Matrix"))
+library(devtools)
+library(Matrix)
+
+# install_bitbucket("nygcresearch/seurat-publicrelease.git", ref="bc12d1b")
+library(Seurat)
+library(tidyverse)
+```
+
+## Load the data & Create Seurat Objects
+
+```{r import}
+data_dir <-"T:/scRNA-Seq/Datasets/Alsya - Joshi et al/Data_renamed/GSM3639113_SC14/"
+list.files(data_dir)
+data.SC14 <- Read10X(data.dir = data_dir)
+SC14 <- CreateSeuratObject(counts = data.SC14, min.cells = 3, min.features = 200,names.field = c(1),project="joshi")
+
+data_dir <-"T:/scRNA-Seq/Datasets/Alsya - Joshi et al/Data_renamed/GSM3639114_SC15/"
+list.files(data_dir)
+data.SC15<- Read10X(data.dir = data_dir)
+SC15 <- CreateSeuratObject(counts = data.SC15, min.cells = 3, min.features = 200,names.field = c(1),project="joshi")
+
+rm(data.SC14)
+rm(data.SC15)
+
+##Dataset Joshi: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE127803
+##Original paper: https://pubmed.ncbi.nlm.nih.gov/31601718/
+```
+
+## Merge Seurat Objects
+```{r}
+joshi.merged <- merge(SC14, y = SC15, add.cell.ids = c("TiO2", "asbestos"),project="joshi")
+joshi.merged
+
+rm(SC14)
+rm(SC15)
+```
+
+#Assign groups
+```{r}
+joshi.merged$treatment <- ifelse((grepl("^TiO2", colnames(joshi.merged))),"TiO2","asbestos")
+```
+
+## Run Base Seurat
+```{r seurat}
+joshi.merged <- NormalizeData(object = joshi.merged)
+joshi.merged <- FindVariableFeatures(object = joshi.merged)
+all.genes <- rownames(joshi.merged )
+joshi.merged  <- ScaleData(object = joshi.merged, features = all.genes)
+joshi.merged <- ScaleData(object = joshi.merged)
+joshi.merged <- RunPCA(object = joshi.merged)
+joshi.merged <- FindNeighbors(object = joshi.merged)
+joshi.merged <- FindClusters(object = joshi.merged)
+
+joshi.merged <- RunUMAP(joshi.merged, 
+                reduction = "pca", 
+               dims = 1:40)
+
+DimPlot(object = joshi.merged, reduction = "umap")
+
+
+```
+
+
+
+```{r}
+# Extract identity and sample information from seurat object to determine the number of cells per cluster per sample
+n_cells <- FetchData(joshi.merged, 
+                     vars = c("ident", "treatment")) %>%
+        dplyr::count(ident, treatment) %>%
+        tidyr::spread(ident, n)
+```
+
+#findallmarkers (Fig. S1)
+```{r}
+joshi.markers <- FindAllMarkers(joshi.merged, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+top20.joshi.merged.10 <- joshi.markers %>% filter(cluster == 10) %>% top_n(n = 20, wt = avg_logFC)
+
+DotPlot(joshi.merged.mac, features = top20.joshi.merged.10$gene) + coord_flip()
+
+```
+
+```{r}
+#choosing mac clusters
+VlnPlot(joshi.merged, features="Cd68")
+joshi.merged.mac <- subset(joshi.merged, idents=c("2","10","14","17"))
+
+
+#cell count pbs vs bleo
+table(Idents(joshi.merged.mac), joshi.merged.mac$treatment)
+Pf4.producer <- subset(joshi.merged.mac, Pf4>0)
+table(Idents(Pf4.producer), Pf4.producer$treatment)
+non.Pf4.producer <- subset(joshi.merged.mac, Pf4<1)
+table(Idents(non.Pf4.producer), non.Pf4.producer$treatment)
+```
+
+
+#UMAP
+```{r}
+DimPlot(object = joshi.merged, reduction = "umap", label=TRUE) + NoLegend()
+FeaturePlot(joshi.merged, features = c("Cd68","Pf4"))
+
+```
+
+#perform Connectome (Fig. S3)
+```{r}
+library(Connectome)
+connectome.genes <- union(Connectome::ncomms8866_mouse$Ligand.ApprovedSymbol,Connectome::ncomms8866_mouse$Receptor.ApprovedSymbol)
+genes <- connectome.genes[connectome.genes %in% rownames(joshi.merged)]
+joshi.merged.con <- ScaleData(joshi.merged,features = genes)
+joshi.merged.con <- CreateConnectome(joshi.merged.con,species = 'mouse',min.cells.per.ident = 75,p.values = F,calculate.DOR = F)
+
+# Filter to edges of interest
+joshi.merged.con2 <- FilterConnectome(joshi.merged.con,min.pct = 0.1,min.z = 0.25,remove.na = T)
+
+# Network Plot
+NetworkPlot(joshi.merged.con2,features = 'Pf4',min.pct = 0.25,weight.attribute = 'weight_sc',include.all.nodes = T)
+
+
+#Circos
+test <- joshi.merged.con2
+test <- data.frame(test %>% group_by(vector) %>% top_n(5,weight_sc))
+cells.of.interest <- c('16','10','8')
+
+CircosPlot(test,weight.attribute = 'weight_norm',sources.include = cells.of.interest,targets.include = cells.of.interest,lab.cex = 0.6,title = 'Edgeweights from normalized slot')
+```

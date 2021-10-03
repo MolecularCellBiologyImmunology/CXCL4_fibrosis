@@ -1,0 +1,160 @@
+---
+title: "Xie_GSE104154"
+author: "Alsya Affandi"
+date: "12/28/2020"
+output: html_document
+---
+
+## Loading Packages
+
+```{r packages}
+library(devtools)
+library(Matrix)
+library(Seurat)
+library(ggplot2)
+library(RColorBrewer)
+library(Connectome)
+library(tidyverse)
+```
+
+## Load the data
+
+```{r import}
+data.xie.raw <- read.table("T:/scRNA-Seq/Datasets/Alsya - Xie et al/Data/GSE104154_d0_d21_sma_tm_Expr_raw.csv", header=T,sep=",",row.names=1)
+
+##Dataset Xie: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE104154
+##Original paper: https://pubmed.ncbi.nlm.nih.gov/29590628/
+```
+
+
+```{r}
+#change rownames to symbol
+data.xie.raw2 <- data.xie.raw
+data.xie.raw2$ensemble.id <- rownames(data.xie.raw2)
+data.xie.raw2$symbol <- as.character(data.xie.raw2$symbol)
+data.xie.raw2$symbol <- make.unique(data.xie.raw2$symbol, sep=".")
+rownames(data.xie.raw2) <-data.xie.raw2$symbol
+```
+
+```{r seurat}
+dataxie <- CreateSeuratObject(counts = data.xie.raw2, min.cells = 3, min.features = 200,names.field = c(1))
+dataxie <- NormalizeData(object = dataxie)
+dataxie <- FindVariableFeatures(object = dataxie)
+all.genes <- rownames(dataxie)
+dataxie <- ScaleData(object = dataxie, features = all.genes)
+dataxie <- RunPCA(object = dataxie)
+dataxie <- FindNeighbors(object = dataxie)
+dataxie <- FindClusters(object = dataxie)
+
+dataxie <- RunUMAP(dataxie, 
+                reduction = "pca", 
+               dims = 1:40)
+```
+
+
+```{r}
+#Group by treatment
+dataxie$sample <- ifelse((grepl(".1$|.2$|.3$", colnames(dataxie))),"PBS","Bleo")
+
+FeaturePlot(dataxie, features = c("Pf4","C1qa"), split.by = "sample")
+
+#Assign replicates
+dataxie$mouse.id <- ifelse((grepl(".1$", colnames(dataxie))),"mouse_1",
+                                ifelse((grepl(".2$", colnames(dataxie))),"mouse_2",
+                                       ifelse((grepl(".3$", colnames(dataxie))),"mouse_3",
+                                              ifelse((grepl(".4$", colnames(dataxie))),"mouse_4",
+                                                    ifelse((grepl(".5$", colnames(dataxie))),"mouse_5",
+                                                           "mouse_6")))))
+```
+
+# PF4 & Macrophages
+```{r}
+#choosing mac clusters
+VlnPlot(dataxie, features="Cd68")
+dataxie.mac <- subset(dataxie, idents=c("2","6","11","13","16"))
+
+#cell count pbs vs bleo
+table(Idents(dataxie.mac), dataxie.mac$sample)
+Pf4.producer <- subset(dataxie.mac, Pf4>0)
+table(Idents(Pf4.producer), Pf4.producer$sample)
+non.Pf4.producer <- subset(dataxie.mac, Pf4<1)
+table(Idents(non.Pf4.producer), non.Pf4.producer$sample)
+```
+
+
+# Findallmarkers
+```{r}
+dataxie.markers <- FindAllMarkers(dataxie, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+top20.dataxie.16 <- dataxie.markers %>% filter(cluster == 16) %>% top_n(n = 20, wt = avg_logFC)
+
+DotPlot(dataxie.mac, features = top20.dataxie.16$gene) + coord_flip()
+```
+
+```{r}
+# Extract identity and sample information from seurat object to determine the number of cells per cluster per sample
+n_cells <- FetchData(dataxie.mac, 
+                     vars = c("ident", "sample")) %>%
+        dplyr::count(ident, sample) %>%
+        tidyr::spread(ident, n)
+```
+ 
+# UMAP Fig. S1
+```{r}
+DimPlot(object = dataxie, reduction = "umap", label=TRUE) + NoLegend()
+FeaturePlot(dataxie, features = c("Ptprc","Cd68","Lyz2","Cd3d","Ms4a1","Pf4"))
+```
+
+# Perform Connectome (Fig. 3)
+```{r}
+connectome.genes <- union(Connectome::ncomms8866_mouse$Ligand.ApprovedSymbol,Connectome::ncomms8866_mouse$Receptor.ApprovedSymbol)
+genes <- connectome.genes[connectome.genes %in% rownames(dataxie)]
+dataxie.con <- ScaleData(dataxie,features = genes)
+dataxie.con <- CreateConnectome(dataxie.con,species = 'mouse',min.cells.per.ident = 75,p.values = F,calculate.DOR = F)
+
+# Filter to edges of interest
+dataxie.con2 <- FilterConnectome(dataxie.con,min.pct = 0.1,min.z = 0.25,remove.na = T)
+
+# Network Plot
+NetworkPlot(dataxie.con2,features = 'Pf4',min.pct = 0.5,weight.attribute = 'weight_sc',include.all.nodes = T)
+
+#Circos
+test <- dataxie.con2
+test <- data.frame(test %>% group_by(vector) %>% top_n(5,weight_sc))
+cells.of.interest <- c('16','10','3','5','8')
+
+CircosPlot(test,weight.attribute = 'weight_norm',sources.include = cells.of.interest,targets.include = cells.of.interest,lab.cex = 0.6,title = 'Edgeweights from normalized slot')
+```
+
+## assign cell types (Fig. S4)
+```{r}
+current_ids <- levels(dataxie$seurat_clusters)
+
+assigned_cell_types <- c("B cells","NK cells","TRAM","Fibroblasts","T cells","Fibroblasts","Monocytes","Smooth muscle cells","Fibroblasts","B cells","Endothelial cells","TRAM","DC","MoAM","Proliferating","AT2","IM","Lymphatics","Mesothelial","Basophils","T cells")
+
+dataxie@meta.data$assigned_cell_types <- plyr::mapvalues(x=dataxie$seurat_clusters, from = current_ids, to= assigned_cell_types)
+
+DimPlot(object = dataxie, reduction = "umap",group.by="assigned_cell_types")
+```
+
+## assign selected cell type - selected (Fig. 3)
+```{r}
+current_ids <- levels(dataxie$seurat_clusters)
+
+assigned_cell_types <- c("Others","Others","Others","Fibroblasts","Others","Fibroblasts","Others","Others","Fibroblasts","Others","Endothelial cells","Others","Others","Others","Others","Others","IM","Others","Others","Others","Others")
+
+dataxie@meta.data$assigned_cell_types <- plyr::mapvalues(x=dataxie$seurat_clusters, from = current_ids, to= assigned_cell_types)
+
+DimPlot(object = dataxie, reduction = "umap",group.by="assigned_cell_types")
+
+
+FeaturePlot(dataxie, features = c("Col1a2","Cldn5","Pf4"))
+
+```
+
+
+## Dotplot - lineage markers (Fig. S4)
+```{r}
+DotPlot(dataxie, features = rev(c("Cd79a","Ms4a1","Gzma","Nkg7","Chil3","Cd68","Dcn","Col1a2","Cd3d","Il7r","Lst1","Ccr2","Mustn1","Igfbp5","Cldn5","Cdh5","H2-DMb1","Trem2","C1qb","Top2a","Mki67","Sftpa1","Sftpb","C1qa","Pf4","Mmrn1","Upk3b","Lrrn4","Mcpt8","Fcer1a"))) + coord_flip() +scale_colour_gradientn( colours=rev(brewer.pal(n=5, name="RdBu")))
+```
+
